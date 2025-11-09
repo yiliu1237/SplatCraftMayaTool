@@ -1,0 +1,4 @@
+*.pyc
+*.Identifier
+/maya_plugin/debugging
+maya_plugin/examples/truck.ply
