@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gaussian Splat Viewer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            width: 100%;
+            height: 100vh;
+            overflow: hidden;
+            background: #1a1a1a;
+            font-family: Arial, sans-serif;
+        }
+
+        #canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        #info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 12px;
+            z-index: 100;
+        }
+
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 18px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 20px;
+            border-radius: 10px;
+        }
+
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+
+    <div id="info">
+        <div>Gaussians: <span id="gaussian-count">0</span></div>
+        <div>FPS: <span id="fps">0</span></div>
+        <div>Camera: <span id="camera-info">Ready</span></div>
+        <div id="rotation-debug" style="font-size: 10px; display: none;">Yaw: <span id="yaw-value">0</span>° Pitch: <span id="pitch-value">0</span>°</div>
+        <div>
+            <button id="toggle-control" style="margin-top: 5px; padding: 5px 10px; cursor: pointer;">
+                Manual Control (OFF)
+            </button>
+        </div>
+        <div id="controls-help" style="display: none; margin-top: 5px; font-size: 10px;">
+            <div>WASD: Move | ZX: Up/Down</div>
+            <div>Mouse: Rotate | Wheel: Zoom</div>
+        </div>
+    </div>
+
+    <div id="loading">Loading Gaussian data...</div>
+
+    <script src="gaussian_renderer.js"></script>
+    <script>
+        // Initialize viewer
+        const viewer = new GaussianViewer('canvas');
+
+        // Expose to Maya (Python can call these via JavaScript bridge)
+        window.viewer = viewer;
+
+        // Test function callable from Python
+        window.setGaussianData = function(data) {
+            console.log('Received Gaussian data from Python:', data.count, 'points');
+            viewer.loadGaussians(data);
+            document.getElementById('loading').classList.add('hidden');
+        };
+
+        // Setup initial camera based on model bounds
+        window.setupInitialCamera = function(modelInfo) {
+            console.log('Setting up initial camera for model:', modelInfo);
+            viewer.setupInitialCamera(modelInfo);
+        };
+
+        // Set initial far camera
+        window.setInitialFarCamera = function(cameraInfo) {
+            console.log('Setting initial far camera:', cameraInfo);
+            viewer.setInitialFarCamera(cameraInfo);
+        };
+
+        // Update camera from Maya
+        window.updateCamera = function(cameraData) {
+            viewer.updateCameraFromMaya(cameraData);
+        };
+
+        // Enable manual control by default
+        viewer.manualControlEnabled = true;
+
+        // Toggle manual control
+        const toggleButton = document.getElementById('toggle-control');
+        const helpDiv = document.getElementById('controls-help');
+        const rotationDebug = document.getElementById('rotation-debug');
+
+        // Set initial button state
+        toggleButton.textContent = 'Manual Control (ON)';
+        toggleButton.style.background = '#4CAF50';
+        toggleButton.style.color = 'white';
+        helpDiv.style.display = 'block';
+        rotationDebug.style.display = 'block';
+        document.getElementById('camera-info').textContent = 'Manual';
+
+        toggleButton.addEventListener('click', () => {
+            viewer.manualControlEnabled = !viewer.manualControlEnabled;
+            if (viewer.manualControlEnabled) {
+                toggleButton.textContent = 'Manual Control (ON)';
+                toggleButton.style.background = '#4CAF50';
+                toggleButton.style.color = 'white';
+                helpDiv.style.display = 'block';
+                rotationDebug.style.display = 'block';
+                document.getElementById('camera-info').textContent = 'Manual';
+            } else {
+                toggleButton.textContent = 'Manual Control (OFF)';
+                toggleButton.style.background = '';
+                toggleButton.style.color = '';
+                helpDiv.style.display = 'none';
+                rotationDebug.style.display = 'none';
+                document.getElementById('camera-info').textContent = 'Synced';
+            }
+        });
+
+        // Signal to Python that viewer is ready
+        window.viewerReady = true;
+        console.log('WebGL Gaussian Viewer initialized and ready');
+    </script>
+</body>
+</html>
