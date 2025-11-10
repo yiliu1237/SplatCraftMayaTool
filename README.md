@@ -125,16 +125,14 @@ SplatCraft/
 
 The Maya plugin uses the **splatter-image** backend to generate 3D Gaussian Splat (3DGS) scenes directly from a single 2D image.
 
----
-
-## Citation
+### Citation
 
 ```bibtex
-@misc{splatcraft2025,
-  title   = {SplatCraft: Maya Authoring and Generation Tool for 3D Gaussian Splatting},
+@misc{splatterimage2024,
+  title   = {Splatter Image: Feed-Forward Single-Image to 3D Gaussian Splat Generation},
   author  = {Anonymous},
-  year    = {2025},
-  note    = {Includes image-to-3DGS via Splatter-Image backend}
+  year    = {2024},
+  note    = {Used as the backend model for SplatCraft’s image-to-3DGS pipeline}
 }
 ```
 ---
