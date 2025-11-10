@@ -123,7 +123,7 @@ SplatCraft/
 
 ## Backend
 
-SplatCraft uses the **[Splatter Image](https://arxiv.org/abs/2406.01452)** model as its core backend for **single-image to 3D Gaussian Splat (3DGS)** generation.  
+SplatCraft uses the **[Splatter Image](https://arxiv.org/abs/2312.13150)** model as its core backend for **single-image to 3D Gaussian Splat (3DGS)** generation.  
 This feed-forward network enables fast, one-shot reconstruction of 3D splats directly from a single RGB input, allowing seamless integration with the Maya authoring pipeline.
 
 ---
