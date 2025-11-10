@@ -82,7 +82,7 @@ SplatCraft/
 
 ## Workflow
 
-1. **Launch Maya**
+1. Launch Maya
 2. Load plugin:
    ```python
    import sys
@@ -121,7 +121,7 @@ SplatCraft/
 
 ---
 
-## Backend Overview (Splatter-Image + Maya)
+## Backend
 
 The Maya plugin uses the **splatter-image** backend to generate 3D Gaussian Splat (3DGS) scenes directly from a single 2D image.
 
