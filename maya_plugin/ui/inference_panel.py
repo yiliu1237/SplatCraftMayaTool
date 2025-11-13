@@ -407,10 +407,13 @@ class SplatCraftInferencePanel(QWidget):
                 self.status_label.setText("Opening cached 3DGS viewer...")
 
                 import maya_webgl_panel
+                # Note: Opening from cached PLY without node_name - rotation sync won't work
+                # User should import to scene first for rotation sync
                 maya_webgl_panel.show_webgl_panel(ply_path=self.cached_ply_path)
 
                 filename = os.path.basename(self.cached_ply_path)
                 self.status_label.setText(f"✓ 3DGS viewer opened (cached: {filename})")
+                print("[InferencePanel] NOTE: Import to Maya scene to enable rotation sync")
                 return
 
             # Priority 2: Get the selected node from dropdown
@@ -420,8 +423,16 @@ class SplatCraftInferencePanel(QWidget):
                 self.status_label.setText("No model selected and no cached PLY available!")
                 return
 
+            # Get transform node (parent of splatCraftNode shape)
+            transform_node = node
+            if cmds.nodeType(node) == 'splatCraftNode':
+                # If it's the shape node, get its parent transform
+                parents = cmds.listRelatives(node, parent=True, type='transform')
+                if parents:
+                    transform_node = parents[0]
+
             num_gaussians = cmds.getAttr(f"{node}.numGaussians")
-            print(f"[InferencePanel] Opening viewer for: {node}")
+            print(f"[InferencePanel] Opening viewer for node: {transform_node}")
 
             # Get the PLY file path from the node (this is what the viewer needs)
             ply_path = cmds.getAttr(f"{node}.filePath")
@@ -430,11 +441,11 @@ class SplatCraftInferencePanel(QWidget):
                 self.status_label.setText("No PLY file associated with this node!")
                 return
 
-            self.status_label.setText(f"Opening 3DGS viewer for {node}...")
+            self.status_label.setText(f"Opening 3DGS viewer for {transform_node}...")
 
-            # Import and show the WebGL viewer with PLY path
+            # Import and show the WebGL viewer with BOTH ply_path AND node_name
             import maya_webgl_panel
-            maya_webgl_panel.show_webgl_panel(ply_path=ply_path)
+            maya_webgl_panel.show_webgl_panel(node_name=transform_node, ply_path=ply_path)
 
             self.status_label.setText(f"✓ 3DGS viewer opened ({num_gaussians:,} Gaussians)")
 

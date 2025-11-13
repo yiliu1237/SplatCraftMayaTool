@@ -23,10 +23,45 @@ class MayaToPy(QtCore.QObject):
     """
     Qt object for JavaScript to Python communication bridge
     """
+    def __init__(self, parent_panel=None):
+        super().__init__()
+        self.parent_panel = parent_panel
+
     @Slot(str)
     def log(self, message):
         """Called from JavaScript to log messages to Python console"""
         print(f"[WebGL] {message}")
+
+    @Slot(result=str)
+    def test(self):
+        """Test method to verify WebChannel connection"""
+        print("[MayaToPy Bridge] test() called - WebChannel is working!")
+        return "Connection OK"
+
+    @Slot(str)
+    def updateMayaCamera(self, camera_json):
+        """Called from JavaScript to update Maya camera from WebGL viewer"""
+        try:
+            camera_data = json.loads(camera_json)
+            if self.parent_panel:
+                self.parent_panel.applyCameraToMaya(camera_data)
+        except Exception as e:
+            print(f"[WebGL→Maya] Error updating camera: {e}")
+
+    @Slot()
+    def requestMayaCamera(self):
+        """Called from JavaScript to request current Maya camera state"""
+        print("[MayaToPy Bridge] requestMayaCamera() called from JavaScript")
+        try:
+            if self.parent_panel:
+                print("[MayaToPy Bridge] Calling parent_panel.sendMayaCameraToWebGL()...")
+                self.parent_panel.sendMayaCameraToWebGL()
+            else:
+                print("[MayaToPy Bridge] ERROR: No parent_panel set!")
+        except Exception as e:
+            print(f"[Maya→WebGL] Error sending camera: {e}")
+            import traceback
+            traceback.print_exc()
 
 
 class WebGLGaussianPanel(QtWidgets.QDialog):
@@ -46,6 +81,13 @@ class WebGLGaussianPanel(QtWidgets.QDialog):
         self.ply_path = ply_path
         self.gaussian_data = None
         self.data_loaded = False
+        self.camera_sync_enabled = False  # Camera view synchronization toggle
+        self.object_sync_enabled = False  # Object transformation synchronization toggle
+
+        # Transform monitoring
+        self.last_transform_matrix = None
+        self.transform_update_count = 0
+        self.transform_monitor_timer = None
 
         # Setup UI
         self.setWindowTitle("SplatCraft - WebGL Viewer")
@@ -54,7 +96,6 @@ class WebGLGaussianPanel(QtWidgets.QDialog):
 
         self.setupUI()
         self.loadGaussianData()
-        # Camera sync removed - using manual control only
 
         print("[WebGLPanel] Panel initialized")
 
@@ -63,8 +104,25 @@ class WebGLGaussianPanel(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # REMOVED: Info bar (takes too much space)
-        # The WebGL viewer has its own info overlay in the canvas
+        # Add sync control bar
+        control_layout = QtWidgets.QHBoxLayout()
+
+        # Camera sync checkbox
+        self.sync_checkbox = QtWidgets.QCheckBox("Sync Camera View with Maya")
+        self.sync_checkbox.setChecked(False)
+        self.sync_checkbox.setToolTip("Rotate view in WebGL → Maya camera orbits (object stays still)")
+        self.sync_checkbox.toggled.connect(self.toggleCameraSync)
+        control_layout.addWidget(self.sync_checkbox)
+
+        # Object transform sync checkbox
+        self.object_sync_checkbox = QtWidgets.QCheckBox("Sync Object Transform")
+        self.object_sync_checkbox.setChecked(False)
+        self.object_sync_checkbox.setToolTip("Rotate Maya object → Gaussians rotate in WebGL viewer")
+        self.object_sync_checkbox.toggled.connect(self.toggleObjectSync)
+        control_layout.addWidget(self.object_sync_checkbox)
+
+        control_layout.addStretch()
+        layout.addLayout(control_layout)
 
         # WebGL viewer (embedded browser) - takes full window
         self.web_view = QtWebEngineWidgets.QWebEngineView()
@@ -90,7 +148,7 @@ class WebGLGaussianPanel(QtWidgets.QDialog):
 
         # Setup web channel for Python ↔ JavaScript communication
         self.channel = QtWebChannel.QWebChannel()
-        self.bridge = MayaToPy()
+        self.bridge = MayaToPy(parent_panel=self)
         self.channel.registerObject('pybridge', self.bridge)
         self.web_view.page().setWebChannel(self.channel)
 
@@ -346,8 +404,322 @@ class WebGLGaussianPanel(QtWidgets.QDialog):
         # Removed info_label update
 
 
+    def toggleCameraSync(self, enabled):
+        """Toggle camera synchronization between Maya and WebGL"""
+        self.camera_sync_enabled = enabled
+
+        if enabled:
+            print("\n" + "="*60)
+            print(f"[CameraSync] ENABLED - WebGL camera → Maya camera")
+            print("  • Rotate view in WebGL → Maya camera orbits")
+            print("  • Object stays still (just like Alt+drag in Maya)")
+            print("="*60 + "\n")
+
+            # Notify JavaScript to enable sync mode
+            js_code = """
+                if (window.viewer) {
+                    window.viewer.syncEnabled = true;
+                    console.log('[CameraSync] Sync mode ENABLED from Python');
+                }
+            """
+            self.web_view.page().runJavaScript(js_code)
+        else:
+            print("[CameraSync] DISABLED - Camera sync off\n")
+
+            # Notify JavaScript to disable sync mode
+            js_code = """
+                if (window.viewer) {
+                    window.viewer.syncEnabled = false;
+                    console.log('[CameraSync] Sync mode DISABLED from Python');
+                }
+            """
+            self.web_view.page().runJavaScript(js_code)
+
+    def createPerspectiveMatrix(self, fov_deg, aspect, near, far):
+        """Create a perspective projection matrix"""
+        import numpy as np
+        fov_rad = np.radians(fov_deg)
+        f = 1.0 / np.tan(fov_rad / 2.0)
+        nf = 1.0 / (near - far)
+
+        return np.array([
+            [f / aspect, 0, 0, 0],
+            [0, f, 0, 0],
+            [0, 0, (far + near) * nf, -1],
+            [0, 0, 2 * far * near * nf, 0]
+        ])
+
+    def applyCameraToMaya(self, camera_data):
+        """Apply WebGL camera position to Maya camera (orbit camera around object)"""
+        if not self.camera_sync_enabled:
+            return
+
+        try:
+            # Extract camera position and target from WebGL
+            position = camera_data.get('position')
+            target = camera_data.get('target')
+
+            if not position or not target:
+                return
+
+            # Get Maya perspective camera
+            camera_transform = 'persp'
+            if not cmds.objExists(camera_transform):
+                return
+
+            # Set camera position to match WebGL camera
+            cmds.xform(camera_transform, translation=position, worldSpace=True)
+
+            # Use aim constraint to point camera at target (most reliable method)
+            # Check if aim constraint already exists
+            constraints = cmds.listConnections(f"{camera_transform}.rotateX", type='aimConstraint')
+            if constraints:
+                # Delete old constraint
+                cmds.delete(constraints)
+
+            # Create temporary locator at target position
+            temp_locator = cmds.spaceLocator(name='temp_camera_target')[0]
+            cmds.xform(temp_locator, translation=target, worldSpace=True)
+
+            # Create aim constraint
+            cmds.aimConstraint(temp_locator, camera_transform,
+                             worldUpType='vector',
+                             worldUpVector=[0, 1, 0],
+                             aimVector=[0, 0, -1],  # Maya camera looks down -Z
+                             upVector=[0, 1, 0])
+
+            # Bake the constraint and delete it
+            cmds.delete(cmds.listConnections(f"{camera_transform}.rotateX", type='aimConstraint'))
+            cmds.delete(temp_locator)
+
+            # Debug: print first few updates
+            if not hasattr(self, '_camera_update_count'):
+                self._camera_update_count = 0
+            self._camera_update_count += 1
+            if self._camera_update_count <= 3:
+                print(f"[WebGL→Maya] Camera orbit #{self._camera_update_count}: pos={position}, target={target}")
+
+        except Exception as e:
+            print(f"[WebGL→Maya] Error updating camera: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def sendMayaCameraToWebGL(self):
+        """Send current Maya camera state to WebGL viewer (one-time snapshot)"""
+        try:
+            print("[Maya→WebGL] Capturing Maya camera state...")
+
+            # Find the perspective camera
+            all_panels = cmds.getPanel(type='modelPanel')
+            camera_transform = None
+            camera_shape = None
+
+            for panel in all_panels:
+                cam = cmds.modelPanel(panel, query=True, camera=True)
+                if cam and 'persp' in cam.lower():
+                    # Maya can return either transform or shape node
+                    if cmds.nodeType(cam) == 'camera':
+                        # It's the shape node
+                        camera_shape = cam
+                        parents = cmds.listRelatives(cam, parent=True)
+                        if parents:
+                            camera_transform = parents[0]
+                    else:
+                        # It's the transform node
+                        camera_transform = cam
+                        shapes = cmds.listRelatives(cam, children=True, type='camera')
+                        if shapes:
+                            camera_shape = shapes[0]
+                    break
+
+            # Fallback to persp camera if not found
+            if not camera_transform or not camera_shape:
+                if cmds.objExists('persp'):
+                    camera_transform = 'persp'
+                    shapes = cmds.listRelatives('persp', children=True, type='camera')
+                    if shapes:
+                        camera_shape = shapes[0]
+                    else:
+                        print("[Maya→WebGL] No camera shape found for persp")
+                        return
+                else:
+                    print("[Maya→WebGL] No perspective camera found")
+                    return
+
+            print(f"[Maya→WebGL] Found camera: transform='{camera_transform}', shape='{camera_shape}'")
+
+            # Get camera world matrix
+            import numpy as np
+            matrix = cmds.xform(camera_transform, query=True, matrix=True, worldSpace=True)
+            maya_matrix = np.array(matrix).reshape(4, 4)
+
+            # Invert to get view matrix
+            view_matrix = np.linalg.inv(maya_matrix)
+
+            # Get camera position and target
+            cam_pos = cmds.xform(camera_transform, query=True, translation=True, worldSpace=True)
+
+            # Calculate target using camera's look direction
+            # Maya camera looks down -Z in its local space
+            look_dir = maya_matrix[:3, 2]  # Third column is Z axis (forward direction)
+            look_distance = 100.0  # Default look distance
+
+            # Try to get center of interest if available
+            if cmds.objExists(f"{camera_transform}.centerOfInterest"):
+                look_distance = cmds.getAttr(f"{camera_transform}.centerOfInterest")
+
+            target = [
+                cam_pos[0] - look_dir[0] * look_distance,
+                cam_pos[1] - look_dir[1] * look_distance,
+                cam_pos[2] - look_dir[2] * look_distance
+            ]
+
+            # Get projection parameters
+            # Calculate aspect ratio from film aperture (Maya doesn't have aspectRatio attribute)
+            h_aperture = cmds.getAttr(f"{camera_shape}.horizontalFilmAperture")
+            v_aperture = cmds.getAttr(f"{camera_shape}.verticalFilmAperture")
+            aspect = h_aperture / v_aperture if v_aperture > 0 else 1.0
+
+            near_clip = cmds.getAttr(f"{camera_shape}.nearClipPlane")
+            far_clip = cmds.getAttr(f"{camera_shape}.farClipPlane")
+            focal_length = cmds.getAttr(f"{camera_shape}.focalLength")
+
+            # Convert focal length to vertical FOV
+            # Maya: focalLength is in mm, verticalFilmAperture is in inches
+            # Convert aperture to mm: 1 inch = 25.4mm
+            v_aperture_mm = v_aperture * 25.4
+            fov_rad = 2 * np.arctan(v_aperture_mm / (2 * focal_length))
+            fov_deg = np.degrees(fov_rad)
+
+            print(f"[Maya→WebGL] Camera params: FOV={fov_deg:.1f}°, aspect={aspect:.2f}, near={near_clip:.2f}, far={far_clip:.1f}")
+
+            # Create perspective projection matrix
+            proj_matrix = self.createPerspectiveMatrix(fov_deg, aspect, near_clip, far_clip)
+
+            # Calculate distance
+            distance = np.linalg.norm(np.array(cam_pos) - np.array(target))
+
+            # Prepare camera data
+            camera_data = {
+                'viewMatrix': view_matrix.flatten().tolist(),
+                'projectionMatrix': proj_matrix.flatten().tolist(),
+                'position': cam_pos,
+                'target': target,
+                'distance': float(distance)
+            }
+
+            # Send to WebGL
+            camera_json = json.dumps(camera_data)
+            js_code = f"if (window.applyMayaCameraView) {{ window.applyMayaCameraView({camera_json}); }}"
+            self.web_view.page().runJavaScript(js_code)
+
+            print(f"[Maya→WebGL] Camera sent: pos={cam_pos}, target={target}, distance={distance:.1f}")
+
+        except Exception as e:
+            print(f"[Maya→WebGL] Error capturing camera: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def toggleObjectSync(self, enabled):
+        """Toggle object transformation synchronization"""
+        self.object_sync_enabled = enabled
+
+        if enabled:
+            if not self.node_name or not cmds.objExists(self.node_name):
+                print("[ObjectSync] ERROR: No valid node to monitor!")
+                self.object_sync_checkbox.setChecked(False)
+                return
+
+            print("\n" + "="*60)
+            print(f"[ObjectSync] ENABLED - Maya object → WebGL Gaussians")
+            print(f"  • Monitoring node: {self.node_name}")
+            print("  • Rotate/move Maya object → Gaussians transform in WebGL")
+            print("="*60 + "\n")
+
+            # Start monitoring transform
+            self.startTransformMonitoring()
+        else:
+            print("[ObjectSync] DISABLED - Object sync off\n")
+            self.stopTransformMonitoring()
+
+    def startTransformMonitoring(self):
+        """Start monitoring the Maya transform node"""
+        if self.transform_monitor_timer is not None:
+            # Already monitoring
+            return
+
+        # Create timer to check transform every 100ms
+        self.transform_monitor_timer = QTimer(self)
+        self.transform_monitor_timer.timeout.connect(self.checkTransformUpdate)
+        self.transform_monitor_timer.start(100)  # Check every 100ms
+
+        # Get initial transform state
+        if cmds.objExists(self.node_name):
+            matrix = cmds.xform(self.node_name, query=True, matrix=True, worldSpace=True)
+            self.last_transform_matrix = tuple(matrix)
+
+        print(f"[ObjectSync] Started monitoring '{self.node_name}'")
+
+    def stopTransformMonitoring(self):
+        """Stop monitoring the Maya transform node"""
+        if self.transform_monitor_timer is not None:
+            self.transform_monitor_timer.stop()
+            self.transform_monitor_timer.deleteLater()
+            self.transform_monitor_timer = None
+            print("[ObjectSync] Stopped transform monitoring")
+
+    def checkTransformUpdate(self):
+        """Check if transform has changed and send update to WebGL"""
+        if not self.object_sync_enabled or not self.node_name:
+            return
+
+        try:
+            if not cmds.objExists(self.node_name):
+                print(f"[ObjectSync] ERROR: Node '{self.node_name}' no longer exists!")
+                self.stopTransformMonitoring()
+                self.object_sync_checkbox.setChecked(False)
+                return
+
+            # Get current world matrix
+            matrix = cmds.xform(self.node_name, query=True, matrix=True, worldSpace=True)
+            current_matrix = tuple(matrix)
+
+            # Check if changed
+            if current_matrix != self.last_transform_matrix:
+                self.last_transform_matrix = current_matrix
+                self.transform_update_count += 1
+
+                # Send transform to WebGL
+                self.sendTransformToWebGL(matrix)
+
+                # Debug: Log first few updates
+                if self.transform_update_count <= 3:
+                    print(f"[ObjectSync] Transform update #{self.transform_update_count}")
+
+        except Exception as e:
+            print(f"[ObjectSync] Error checking transform: {e}")
+
+    def sendTransformToWebGL(self, matrix):
+        """Send transform matrix to WebGL viewer"""
+        try:
+            # Maya matrix is 4x4 row-major
+            matrix_array = list(matrix)
+
+            # Send to JavaScript
+            matrix_json = json.dumps(matrix_array)
+            js_code = f"if (window.viewer && window.viewer.applyObjectTransform) {{ window.viewer.applyObjectTransform({matrix_json}); }}"
+            self.web_view.page().runJavaScript(js_code)
+
+        except Exception as e:
+            print(f"[ObjectSync] Error sending transform: {e}")
+            import traceback
+            traceback.print_exc()
+
     def closeEvent(self, event):
         """Clean up when closing"""
+        # Stop transform monitoring
+        self.stopTransformMonitoring()
+
         print("[WebGLPanel] Panel closed")
         super().closeEvent(event)
 

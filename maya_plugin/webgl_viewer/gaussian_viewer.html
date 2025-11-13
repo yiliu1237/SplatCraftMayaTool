@@ -66,6 +66,12 @@
             <button id="toggle-control" style="margin-top: 5px; padding: 5px 10px; cursor: pointer;">
                 Manual Control (OFF)
             </button>
+            <button id="match-maya-view" style="margin-top: 5px; padding: 5px 10px; cursor: pointer; background: #2196F3; color: white; border: none; border-radius: 3px; font-weight: bold;" title="Snap WebGL camera to match current Maya viewport view">
+                📷 Match Maya View
+            </button>
+            <button id="toggle-grid" style="margin-top: 5px; padding: 5px 10px; cursor: pointer; background: #4CAF50; color: white; border: none; border-radius: 3px;" title="Toggle XZ ground plane grid">
+                ▦ Grid (ON)
+            </button>
         </div>
         <div id="controls-help" style="display: none; margin-top: 5px; font-size: 10px;">
             <div>WASD: Move | ZX: Up/Down</div>
@@ -75,6 +81,7 @@
 
     <div id="loading">Loading Gaussian data...</div>
 
+    <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
     <script src="gaussian_renderer.js"></script>
     <script>
         // Initialize viewer
@@ -139,6 +146,158 @@
                 helpDiv.style.display = 'none';
                 rotationDebug.style.display = 'none';
                 document.getElementById('camera-info').textContent = 'Synced';
+            }
+        });
+
+        // Setup QtWebChannel for Python communication
+        let pybridge = null;
+        let cameraSendCount = 0;
+        if (typeof QWebChannel !== 'undefined') {
+            new QWebChannel(qt.webChannelTransport, function(channel) {
+                pybridge = channel.objects.pybridge;
+                console.log('[WebChannel] Qt WebChannel connected to Python bridge');
+
+                // Test the connection
+                if (pybridge && pybridge.test) {
+                    pybridge.test(function(result) {
+                        console.log('[WebChannel] Connection test result:', result);
+                    });
+                }
+
+                // Check what methods are available
+                console.log('[WebChannel] Available methods:', Object.keys(pybridge));
+            });
+        } else {
+            console.warn('[WebChannel] QWebChannel not available');
+        }
+
+        // Function to send camera updates to Maya (WebGL → Maya)
+        let lastCameraSendTime = 0;
+        const cameraSendThrottle = 100; // Send at most every 100ms
+
+        function sendCameraToMaya() {
+            if (!pybridge) {
+                if (cameraSendCount === 0) {
+                    console.warn('[WebGL→Maya] PyBridge not connected yet');
+                }
+                return;
+            }
+
+            if (!viewer.syncEnabled) return;
+
+            const now = Date.now();
+            if (now - lastCameraSendTime < cameraSendThrottle) return;
+            lastCameraSendTime = now;
+
+            // Send camera state to Python
+            const cameraData = {
+                position: viewer.manualCamera.position,
+                target: viewer.manualCamera.target,
+                yaw: viewer.manualCamera.yaw,
+                pitch: viewer.manualCamera.pitch,
+                distance: viewer.manualCamera.distance
+            };
+
+            // Debug first few sends
+            cameraSendCount++;
+            if (cameraSendCount <= 3) {
+                console.log(`[WebGL→Maya] Sending camera update #${cameraSendCount}:`, cameraData);
+            }
+
+            pybridge.updateMayaCamera(JSON.stringify(cameraData));
+        }
+
+        // Hook into camera updates
+        // We'll call this periodically from the render loop
+        setInterval(() => {
+            if (viewer.syncEnabled && (viewer.mouseDown || Object.values(viewer.keys).some(k => k))) {
+                sendCameraToMaya();
+            }
+        }, 100);
+
+        // Also send on keyboard movement
+        window.addEventListener('keypress', (e) => {
+            if (viewer.syncEnabled && ['w', 'a', 's', 'd', 'z', 'x'].includes(e.key.toLowerCase())) {
+                setTimeout(sendCameraToMaya, 50);
+            }
+        });
+
+        // Global function to receive camera from Maya (Maya → WebGL)
+        window.updateCameraFromMaya = function(cameraData) {
+            viewer.updateCameraFromMaya(cameraData);
+        };
+
+        // Button to match Maya viewport camera
+        const matchMayaViewBtn = document.getElementById('match-maya-view');
+        matchMayaViewBtn.addEventListener('click', () => {
+            if (!pybridge) {
+                console.error('[MatchView] PyBridge not connected yet!');
+                document.getElementById('camera-info').textContent = 'Error: No bridge';
+                alert('WebChannel not connected yet. Please wait a moment and try again.');
+                return;
+            }
+
+            console.log('[MatchView] Requesting Maya camera state...');
+            document.getElementById('camera-info').textContent = 'Matching...';
+
+            try {
+                // Request Maya camera state from Python
+                pybridge.requestMayaCamera();
+                console.log('[MatchView] Request sent to Python');
+
+                // Set timeout to detect if no response
+                setTimeout(() => {
+                    if (document.getElementById('camera-info').textContent === 'Matching...') {
+                        console.error('[MatchView] No response from Python after 2 seconds');
+                        document.getElementById('camera-info').textContent = 'Error';
+                    }
+                }, 2000);
+            } catch (e) {
+                console.error('[MatchView] Error calling Python:', e);
+                document.getElementById('camera-info').textContent = 'Error';
+                alert('Failed to call Python: ' + e.message);
+            }
+        });
+
+        // Global function to apply Maya camera (called from Python)
+        window.applyMayaCameraView = function(cameraData) {
+            console.log('[MatchView] Received Maya camera data:', cameraData);
+
+            // Apply the view and projection matrices directly
+            viewer.camera.viewMatrix = new Float32Array(cameraData.viewMatrix);
+            viewer.camera.projectionMatrix = new Float32Array(cameraData.projectionMatrix);
+
+            // Also update manual camera state for continued navigation
+            if (cameraData.position && cameraData.target) {
+                viewer.manualCamera.position = cameraData.position;
+                viewer.manualCamera.target = cameraData.target;
+                viewer.manualCamera.distance = cameraData.distance || 100;
+
+                // Calculate yaw and pitch from position and target
+                const dx = cameraData.target[0] - cameraData.position[0];
+                const dy = cameraData.target[1] - cameraData.position[1];
+                const dz = cameraData.target[2] - cameraData.position[2];
+
+                viewer.manualCamera.yaw = Math.atan2(dx, dz);
+                viewer.manualCamera.pitch = Math.atan2(dy, Math.sqrt(dx*dx + dz*dz));
+            }
+
+            document.getElementById('camera-info').textContent = 'Maya View';
+            console.log('[MatchView] Camera matched successfully!');
+        };
+
+        // Grid toggle button
+        const toggleGridBtn = document.getElementById('toggle-grid');
+        toggleGridBtn.addEventListener('click', () => {
+            viewer.showGrid = !viewer.showGrid;
+            if (viewer.showGrid) {
+                toggleGridBtn.textContent = '▦ Grid (ON)';
+                toggleGridBtn.style.background = '#4CAF50';
+                console.log('[Grid] Grid enabled');
+            } else {
+                toggleGridBtn.textContent = '▦ Grid (OFF)';
+                toggleGridBtn.style.background = '';
+                console.log('[Grid] Grid disabled');
             }
         });
 

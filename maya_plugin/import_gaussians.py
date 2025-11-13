@@ -222,17 +222,29 @@ def import_gaussian_scene(ply_path, node_name=None, open_webgl=True):
                 import importlib
                 importlib.reload(sys.modules['maya_webgl_panel'])
 
+            # Get the transform node (parent of the shape node)
+            transform_node = node_name
+            if cmds.nodeType(node_name) == 'splatCraftNode':
+                parents = cmds.listRelatives(node_name, parent=True, type='transform')
+                if parents:
+                    transform_node = parents[0]
+
             import maya_webgl_panel
-            panel = maya_webgl_panel.show_webgl_panel(ply_path=str(ply_path))
+            # Pass BOTH node_name (transform) and ply_path for full functionality
+            panel = maya_webgl_panel.show_webgl_panel(node_name=transform_node, ply_path=str(ply_path))
 
             print("✓ WebGL panel opened!")
             print(f"  Viewport: {int(num_gaussians * initial_lod):,} sampled points")
             print(f"  WebGL: {num_gaussians:,} full Gaussians")
-            print("\n🎮 Camera sync enabled - rotate viewport to see synchronized movement!")
+            print(f"\n🎮 Object rotation sync available!")
+            print(f"   → Check 'Sync Object Rotation' in WebGL viewer")
+            print(f"   → Rotate view in WebGL to rotate '{transform_node}' in Maya")
 
         except Exception as e:
             print(f"⚠️  Warning: Could not open WebGL panel: {e}")
             print("   (You can still view point cloud in viewport)")
+            import traceback
+            traceback.print_exc()
 
     return node_name, gaussian_data
 

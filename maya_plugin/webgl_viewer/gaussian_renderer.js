@@ -25,7 +25,8 @@ class GaussianViewer {
         };
 
         // Manual control state
-        this.manualControlEnabled = false;
+        this.manualControlEnabled = true;
+        this.syncEnabled = false;  // Bidirectional sync with Maya
         this.manualCamera = {
             position: [0, 0, 100],
             target: [0, 0, 0],
@@ -43,6 +44,17 @@ class GaussianViewer {
         this.frameCount = 0;
         this.lastTime = performance.now();
         this.fps = 0;
+
+        // Grid display
+        this.showGrid = true;
+        this.gridSize = 100;  // Grid extends from -gridSize to +gridSize
+        this.gridSpacing = 10;  // Distance between grid lines
+        this.gridBuffers = null;
+        this.axisBuffers = null;
+        this.showAxis = true;
+
+        // Object transformation (from Maya)
+        this.objectTransformMatrix = this.createIdentityMatrix();
 
         // Initialize
         this.setupWebGL();
@@ -67,8 +79,11 @@ class GaussianViewer {
 
 
         this.compileShaders();
+        this.compileGridShader();
         this.setupCanvas();
         this.setupManualControls();
+        this.createGrid();
+        this.createAxis();
         this.startRenderLoop();
 
         this.writeDepth = true;
@@ -107,6 +122,7 @@ class GaussianViewer {
 
             uniform mat4 u_viewMatrix;
             uniform mat4 u_projectionMatrix;
+            uniform mat4 u_objectTransform;  // Object transformation from Maya
 
             varying vec3 v_color;
             varying float v_opacity;
@@ -131,8 +147,9 @@ class GaussianViewer {
                 v_color   = a_color;
                 v_opacity = a_opacity;
 
-                // center in view/clip
-                vec4 centerView = u_viewMatrix * vec4(a_center, 1.0);
+                // Apply object transformation first, then view
+                vec4 centerWorld = u_objectTransform * vec4(a_center, 1.0);
+                vec4 centerView = u_viewMatrix * centerWorld;
                 vec4 centerClip = u_projectionMatrix * centerView;
 
                 // 3D basis from quat and scales
@@ -140,6 +157,11 @@ class GaussianViewer {
                 mat3 R = quatToMat3(qn);
                 vec3 sx = R[0] * a_scale.x;
                 vec3 sy = R[1] * a_scale.y;
+
+                // Apply object transformation rotation to basis vectors
+                mat3 objRot = mat3(u_objectTransform);
+                sx = objRot * sx;
+                sy = objRot * sy;
 
                 // project basis endpoints, derive 2D screen-space basis vectors
                 mat3 V = mat3(u_viewMatrix);     // rotation part of view matrix
@@ -210,10 +232,205 @@ class GaussianViewer {
             a_color:   gl.getAttribLocation(this.program, 'a_color'),
             a_opacity: gl.getAttribLocation(this.program, 'a_opacity'),
             u_viewMatrix: gl.getUniformLocation(this.program, 'u_viewMatrix'),
-            u_projectionMatrix: gl.getUniformLocation(this.program, 'u_projectionMatrix')
+            u_projectionMatrix: gl.getUniformLocation(this.program, 'u_projectionMatrix'),
+            u_objectTransform: gl.getUniformLocation(this.program, 'u_objectTransform')
         };
 
         console.log('Shaders compiled successfully');
+    }
+
+    compileGridShader() {
+        const gl = this.gl;
+
+        // Simple vertex shader for grid lines
+        const gridVertexShader = `
+            attribute vec3 a_position;
+            uniform mat4 u_viewMatrix;
+            uniform mat4 u_projectionMatrix;
+
+            void main() {
+                gl_Position = u_projectionMatrix * u_viewMatrix * vec4(a_position, 1.0);
+            }
+        `;
+
+        // Simple fragment shader for grid lines
+        const gridFragmentShader = `
+            precision mediump float;
+            uniform vec3 u_color;
+            uniform float u_alpha;
+
+            void main() {
+                gl_FragColor = vec4(u_color, u_alpha);
+            }
+        `;
+
+        // Compile shaders
+        const vertexShader = this.createShader(gl.VERTEX_SHADER, gridVertexShader);
+        const fragmentShader = this.createShader(gl.FRAGMENT_SHADER, gridFragmentShader);
+
+        // Link program
+        this.gridProgram = gl.createProgram();
+        gl.attachShader(this.gridProgram, vertexShader);
+        gl.attachShader(this.gridProgram, fragmentShader);
+        gl.linkProgram(this.gridProgram);
+
+        if (!gl.getProgramParameter(this.gridProgram, gl.LINK_STATUS)) {
+            console.error('Grid shader program failed to link:', gl.getProgramInfoLog(this.gridProgram));
+            return;
+        }
+
+        // Get attribute and uniform locations
+        this.gridLocations = {
+            a_position: gl.getAttribLocation(this.gridProgram, 'a_position'),
+            u_viewMatrix: gl.getUniformLocation(this.gridProgram, 'u_viewMatrix'),
+            u_projectionMatrix: gl.getUniformLocation(this.gridProgram, 'u_projectionMatrix'),
+            u_color: gl.getUniformLocation(this.gridProgram, 'u_color'),
+            u_alpha: gl.getUniformLocation(this.gridProgram, 'u_alpha')
+        };
+
+        console.log('Grid shader compiled successfully');
+    }
+
+    createGrid() {
+        const gl = this.gl;
+
+        // Create grid vertices (XZ plane, Y=0)
+        const vertices = [];
+
+        // Lines parallel to X axis
+        for (let z = -this.gridSize; z <= this.gridSize; z += this.gridSpacing) {
+            vertices.push(-this.gridSize, 0, z);
+            vertices.push(this.gridSize, 0, z);
+        }
+
+        // Lines parallel to Z axis
+        for (let x = -this.gridSize; x <= this.gridSize; x += this.gridSpacing) {
+            vertices.push(x, 0, -this.gridSize);
+            vertices.push(x, 0, this.gridSize);
+        }
+
+        this.gridVertexCount = vertices.length / 3;
+
+        // Create buffer
+        this.gridBuffers = {
+            position: gl.createBuffer()
+        };
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.gridBuffers.position);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+
+        console.log(`Grid created: ${this.gridVertexCount} vertices`);
+    }
+
+    createAxis() {
+        const gl = this.gl;
+
+        // Create XYZ axis lines
+        const axisLength = 20;
+        const vertices = [];
+        const colors = [];
+
+        // X axis (red)
+        vertices.push(0, 0, 0,  axisLength, 0, 0);
+        colors.push(1, 0, 0,  1, 0, 0);
+
+        // Y axis (green)
+        vertices.push(0, 0, 0,  0, axisLength, 0);
+        colors.push(0, 1, 0,  0, 1, 0);
+
+        // Z axis (blue)
+        vertices.push(0, 0, 0,  0, 0, axisLength);
+        colors.push(0, 0, 1,  0, 0, 1);
+
+        this.axisVertexCount = vertices.length / 3;
+
+        // Create buffers
+        this.axisBuffers = {
+            position: gl.createBuffer(),
+            color: gl.createBuffer()
+        };
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.axisBuffers.position);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.axisBuffers.color);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(colors), gl.STATIC_DRAW);
+
+        console.log('XYZ axes created');
+    }
+
+    renderAxis() {
+        if (!this.showAxis || !this.gridProgram || !this.axisBuffers) {
+            return;
+        }
+
+        const gl = this.gl;
+
+        // Use grid shader (it supports colored lines too)
+        gl.useProgram(this.gridProgram);
+
+        // Set uniforms
+        gl.uniformMatrix4fv(this.gridLocations.u_viewMatrix, false, this.camera.viewMatrix);
+        gl.uniformMatrix4fv(this.gridLocations.u_projectionMatrix, false, this.camera.projectionMatrix);
+
+        // Bind position buffer
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.axisBuffers.position);
+        gl.enableVertexAttribArray(this.gridLocations.a_position);
+        gl.vertexAttribPointer(this.gridLocations.a_position, 3, gl.FLOAT, false, 0, 0);
+
+        // Set line width (if supported)
+        gl.lineWidth(3);
+
+        // Draw X axis (red)
+        gl.uniform3f(this.gridLocations.u_color, 1, 0, 0);
+        gl.uniform1f(this.gridLocations.u_alpha, 1.0);  // Fully opaque
+        gl.drawArrays(gl.LINES, 0, 2);
+
+        // Draw Y axis (green)
+        gl.uniform3f(this.gridLocations.u_color, 0, 1, 0);
+        gl.uniform1f(this.gridLocations.u_alpha, 1.0);
+        gl.drawArrays(gl.LINES, 2, 2);
+
+        // Draw Z axis (blue)
+        gl.uniform3f(this.gridLocations.u_color, 0, 0, 1);
+        gl.uniform1f(this.gridLocations.u_alpha, 1.0);
+        gl.drawArrays(gl.LINES, 4, 2);
+
+        // Reset line width
+        gl.lineWidth(1);
+
+        // Cleanup
+        gl.disableVertexAttribArray(this.gridLocations.a_position);
+    }
+
+    renderGrid() {
+        if (!this.showGrid || !this.gridProgram || !this.gridBuffers) {
+            return;
+        }
+
+        const gl = this.gl;
+
+        // Use grid shader
+        gl.useProgram(this.gridProgram);
+
+        // Set uniforms
+        gl.uniformMatrix4fv(this.gridLocations.u_viewMatrix, false, this.camera.viewMatrix);
+        gl.uniformMatrix4fv(this.gridLocations.u_projectionMatrix, false, this.camera.projectionMatrix);
+
+        // Grid color - Maya-like gray, semi-transparent
+        gl.uniform3f(this.gridLocations.u_color, 0.5, 0.5, 0.5);
+        gl.uniform1f(this.gridLocations.u_alpha, 0.3);
+
+        // Bind position buffer
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.gridBuffers.position);
+        gl.enableVertexAttribArray(this.gridLocations.a_position);
+        gl.vertexAttribPointer(this.gridLocations.a_position, 3, gl.FLOAT, false, 0, 0);
+
+        // Draw lines
+        gl.drawArrays(gl.LINES, 0, this.gridVertexCount);
+
+        // Cleanup
+        gl.disableVertexAttribArray(this.gridLocations.a_position);
     }
 
     createShader(type, source) {
@@ -286,8 +503,8 @@ class GaussianViewer {
     }
 
     updateCameraFromMaya(cameraData) {
-        // Don't update if manual control is enabled
-        if (this.manualControlEnabled) {
+        // Only update if sync is enabled
+        if (!this.syncEnabled) {
             return;
         }
 
@@ -405,13 +622,8 @@ class GaussianViewer {
             this.manualCamera.yaw -= deltaX * sensitivity;
             this.manualCamera.pitch -= deltaY * sensitivity;
 
-            // Yaw can spin freely 360° - no wrapping needed, just let it accumulate
-            // (Math functions handle large angles fine)
-
-            // Clamp pitch to prevent looking straight up/down (gimbal lock)
-            const wrapPi = (a) => ((a + Math.PI) % (2*Math.PI) + 2*Math.PI) % (2*Math.PI) - Math.PI;
-            this.manualCamera.yaw   = wrapPi(this.manualCamera.yaw);
-            this.manualCamera.pitch = wrapPi(this.manualCamera.pitch);
+            // Clamp pitch to avoid flipping
+            this.manualCamera.pitch = Math.max(-Math.PI/2 + 0.01, Math.min(Math.PI/2 - 0.01, this.manualCamera.pitch));
 
             this.lastMouseX = e.clientX;
             this.lastMouseY = e.clientY;
@@ -590,9 +802,15 @@ class GaussianViewer {
     render() {
         const gl = this.gl;
 
+        // Clear
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+        // Render grid and axes first (behind everything)
+        this.renderGrid();
+        this.renderAxis();
+
         if (!this.program || this.gaussianCount === 0) {
-            // Clear screen while waiting for data
-            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+            // Just show grid if no Gaussians loaded
             return;
         }
 
@@ -603,9 +821,6 @@ class GaussianViewer {
             console.log(`[Render] View matrix:`, this.camera.viewMatrix.slice(0, 8));
             console.log(`[Render] Projection matrix:`, this.camera.projectionMatrix.slice(0, 8));
         }
-
-        // Clear
-        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
         // Use shader program
         gl.useProgram(this.program);
@@ -624,7 +839,8 @@ class GaussianViewer {
         // Set uniforms
         gl.uniformMatrix4fv(this.locations.u_viewMatrix, false, this.camera.viewMatrix);
         gl.uniformMatrix4fv(this.locations.u_projectionMatrix, false, this.camera.projectionMatrix);
-        
+        gl.uniformMatrix4fv(this.locations.u_objectTransform, false, this.objectTransformMatrix);
+
 
         this.bindInstanced();
         this.extInst.drawArraysInstancedANGLE(gl.TRIANGLE_STRIP, 0, 4, this.gaussianCount);
@@ -739,5 +955,43 @@ class GaussianViewer {
             0, 0, (far + near) * nf, -1,
             0, 0, 2 * far * near * nf, 0
         ]);
+    }
+
+    applyObjectTransform(mayaMatrix) {
+        /**
+         * Apply object transformation from Maya to all Gaussians
+         *
+         * @param {Array} mayaMatrix - 4x4 transformation matrix from Maya (row-major, 16 floats)
+         *
+         * Maya matrix format is row-major:
+         * [m00, m01, m02, m03,
+         *  m10, m11, m12, m13,
+         *  m20, m21, m22, m23,
+         *  m30, m31, m32, m33]
+         *
+         * WebGL expects column-major. Maya uses row-vectors (v*M), WebGL uses column-vectors (M*v)
+         * To convert: keep matrix as-is (don't transpose) because Maya's row-major with row-vectors
+         * equals WebGL's column-major with column-vectors
+         */
+        if (!mayaMatrix || mayaMatrix.length !== 16) {
+            console.error('[ObjectTransform] Invalid matrix received:', mayaMatrix);
+            return;
+        }
+
+        // Maya's row-major matrix can be used directly in WebGL's column-major layout
+        // This preserves the correct rotation direction
+        this.objectTransformMatrix = new Float32Array(mayaMatrix);
+
+        // Debug: Log first few transforms
+        if (!this.transformUpdateCount) this.transformUpdateCount = 0;
+        this.transformUpdateCount++;
+
+        if (this.transformUpdateCount <= 3) {
+            console.log(`[ObjectTransform] Update #${this.transformUpdateCount}:`, {
+                translation: [mayaMatrix[12], mayaMatrix[13], mayaMatrix[14]],
+                rotation: 'applied',
+                matrix: this.objectTransformMatrix
+            });
+        }
     }
 }
