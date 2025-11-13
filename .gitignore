@@ -2,3 +2,4 @@
 *.Identifier
 /maya_plugin/debugging
 maya_plugin/examples/truck.ply
+maya_plugin/.DS_Store
