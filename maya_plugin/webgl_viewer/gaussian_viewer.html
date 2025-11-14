@@ -27,14 +27,41 @@
 
         #info {
             position: absolute;
-            top: 10px;
-            left: 10px;
+            top: 15px;
+            left: 15px;
             color: white;
-            background: rgba(0, 0, 0, 0.7);
-            padding: 10px;
-            border-radius: 5px;
-            font-size: 12px;
+            background: rgba(0, 0, 0, 0.75);
+            padding: 15px 18px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-family: 'Segoe UI', Arial, sans-serif;
             z-index: 100;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        }
+
+        #info > div {
+            margin: 6px 0;
+            line-height: 1.5;
+        }
+
+        #info span {
+            font-weight: bold;
+            color: #4CAF50;
+        }
+
+        .section-title {
+            font-size: 12px;
+            color: #aaa;
+            margin-bottom: 8px;
+            font-weight: 600;
+        }
+
+        .section-divider {
+            margin-top: 12px;
+            padding-top: 10px;
+            border-top: 1px solid rgba(255, 255, 255, 0.15);
         }
 
         #loading {
@@ -43,14 +70,66 @@
             left: 50%;
             transform: translate(-50%, -50%);
             color: white;
-            font-size: 18px;
-            background: rgba(0, 0, 0, 0.8);
-            padding: 20px;
-            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 600;
+            font-family: 'Segoe UI', Arial, sans-serif;
+            background: rgba(0, 0, 0, 0.85);
+            padding: 25px 35px;
+            border-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+            backdrop-filter: blur(10px);
         }
 
         .hidden {
             display: none;
+        }
+
+        /* Button styling */
+        button {
+            margin-top: 8px;
+            padding: 8px 16px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 600;
+            border: none;
+            border-radius: 6px;
+            transition: all 0.2s ease;
+            font-family: 'Segoe UI', Arial, sans-serif;
+        }
+
+        button:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        .btn-green {
+            background: linear-gradient(135deg, #4CAF50, #45a049);
+            color: white;
+        }
+
+        .btn-green:hover {
+            background: linear-gradient(135deg, #45a049, #3d8b40);
+        }
+
+        .btn-gray {
+            background: #555555;
+            color: #cccccc;
+        }
+
+        .btn-gray:hover {
+            background: #666666;
+        }
+
+        #controls-help {
+            display: none;
+            margin-top: 8px;
+            font-size: 12px;
+            opacity: 0.85;
         }
     </style>
 </head>
@@ -61,25 +140,37 @@
         <div>Gaussians: <span id="gaussian-count">0</span></div>
         <div>FPS: <span id="fps">0</span></div>
         <div>Camera: <span id="camera-info">Ready</span></div>
-        <div id="rotation-debug" style="font-size: 10px; display: none;">Yaw: <span id="yaw-value">0</span>° Pitch: <span id="pitch-value">0</span>°</div>
-        <div>
-            <button id="toggle-control" style="margin-top: 5px; padding: 5px 10px; cursor: pointer;">
-                Manual Control (OFF)
+        <div id="rotation-debug" style="font-size: 11px; display: none; opacity: 0.7;">Yaw: <span id="yaw-value">0</span>° Pitch: <span id="pitch-value">0</span>°</div>
+
+        <div class="section-divider">
+            <div class="section-title">⚙️ Controls</div>
+            <button id="toggle-control" class="btn-gray">
+                🕹️ Manual Control (OFF)
             </button>
-            <button id="match-maya-view" style="margin-top: 5px; padding: 5px 10px; cursor: pointer; background: #2196F3; color: white; border: none; border-radius: 3px; font-weight: bold;" title="Snap WebGL camera to match current Maya viewport view">
-                📷 Match Maya View
-            </button>
-            <button id="toggle-grid" style="margin-top: 5px; padding: 5px 10px; cursor: pointer; background: #4CAF50; color: white; border: none; border-radius: 3px;" title="Toggle XZ ground plane grid">
+            <button id="toggle-grid" class="btn-green" title="Toggle XZ ground plane grid">
                 ▦ Grid (ON)
             </button>
         </div>
-        <div id="controls-help" style="display: none; margin-top: 5px; font-size: 10px;">
-            <div>WASD: Move | ZX: Up/Down</div>
-            <div>Mouse: Rotate | Wheel: Zoom</div>
+
+        <div class="section-divider">
+            <div class="section-title">🔗 Sync</div>
+            <button id="camera-sync-btn" class="btn-green" title="Rotate view in WebGL → Maya camera orbits">
+                🎥 Camera (ON)
+            </button>
+            <button id="object-sync-btn" class="btn-green" title="Rotate Maya object → Gaussians rotate in WebGL">
+                🔄 Object (ON)
+            </button>
+        </div>
+        <div id="controls-help">
+            <div style="margin-top: 5px;">🎮 Controls:</div>
+            <div style="margin-left: 10px;">• WASD: Move</div>
+            <div style="margin-left: 10px;">• ZX: Up/Down</div>
+            <div style="margin-left: 10px;">• Mouse: Rotate</div>
+            <div style="margin-left: 10px;">• Wheel: Zoom</div>
         </div>
     </div>
 
-    <div id="loading">Loading Gaussian data...</div>
+    <div id="loading">⏳ Loading Gaussian data...</div>
 
     <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
     <script src="gaussian_renderer.js"></script>
@@ -123,9 +214,8 @@
         const rotationDebug = document.getElementById('rotation-debug');
 
         // Set initial button state
-        toggleButton.textContent = 'Manual Control (ON)';
-        toggleButton.style.background = '#4CAF50';
-        toggleButton.style.color = 'white';
+        toggleButton.textContent = '🕹️ Manual Control (ON)';
+        toggleButton.className = 'btn-green';
         helpDiv.style.display = 'block';
         rotationDebug.style.display = 'block';
         document.getElementById('camera-info').textContent = 'Manual';
@@ -133,16 +223,14 @@
         toggleButton.addEventListener('click', () => {
             viewer.manualControlEnabled = !viewer.manualControlEnabled;
             if (viewer.manualControlEnabled) {
-                toggleButton.textContent = 'Manual Control (ON)';
-                toggleButton.style.background = '#4CAF50';
-                toggleButton.style.color = 'white';
+                toggleButton.textContent = '🕹️ Manual Control (ON)';
+                toggleButton.className = 'btn-green';
                 helpDiv.style.display = 'block';
                 rotationDebug.style.display = 'block';
                 document.getElementById('camera-info').textContent = 'Manual';
             } else {
-                toggleButton.textContent = 'Manual Control (OFF)';
-                toggleButton.style.background = '';
-                toggleButton.style.color = '';
+                toggleButton.textContent = '🕹️ Manual Control (OFF)';
+                toggleButton.className = 'btn-gray';
                 helpDiv.style.display = 'none';
                 rotationDebug.style.display = 'none';
                 document.getElementById('camera-info').textContent = 'Synced';
@@ -227,77 +315,70 @@
             viewer.updateCameraFromMaya(cameraData);
         };
 
-        // Button to match Maya viewport camera
-        const matchMayaViewBtn = document.getElementById('match-maya-view');
-        matchMayaViewBtn.addEventListener('click', () => {
-            if (!pybridge) {
-                console.error('[MatchView] PyBridge not connected yet!');
-                document.getElementById('camera-info').textContent = 'Error: No bridge';
-                alert('WebChannel not connected yet. Please wait a moment and try again.');
-                return;
-            }
-
-            console.log('[MatchView] Requesting Maya camera state...');
-            document.getElementById('camera-info').textContent = 'Matching...';
-
-            try {
-                // Request Maya camera state from Python
-                pybridge.requestMayaCamera();
-                console.log('[MatchView] Request sent to Python');
-
-                // Set timeout to detect if no response
-                setTimeout(() => {
-                    if (document.getElementById('camera-info').textContent === 'Matching...') {
-                        console.error('[MatchView] No response from Python after 2 seconds');
-                        document.getElementById('camera-info').textContent = 'Error';
-                    }
-                }, 2000);
-            } catch (e) {
-                console.error('[MatchView] Error calling Python:', e);
-                document.getElementById('camera-info').textContent = 'Error';
-                alert('Failed to call Python: ' + e.message);
-            }
-        });
-
-        // Global function to apply Maya camera (called from Python)
-        window.applyMayaCameraView = function(cameraData) {
-            console.log('[MatchView] Received Maya camera data:', cameraData);
-
-            // Apply the view and projection matrices directly
-            viewer.camera.viewMatrix = new Float32Array(cameraData.viewMatrix);
-            viewer.camera.projectionMatrix = new Float32Array(cameraData.projectionMatrix);
-
-            // Also update manual camera state for continued navigation
-            if (cameraData.position && cameraData.target) {
-                viewer.manualCamera.position = cameraData.position;
-                viewer.manualCamera.target = cameraData.target;
-                viewer.manualCamera.distance = cameraData.distance || 100;
-
-                // Calculate yaw and pitch from position and target
-                const dx = cameraData.target[0] - cameraData.position[0];
-                const dy = cameraData.target[1] - cameraData.position[1];
-                const dz = cameraData.target[2] - cameraData.position[2];
-
-                viewer.manualCamera.yaw = Math.atan2(dx, dz);
-                viewer.manualCamera.pitch = Math.atan2(dy, Math.sqrt(dx*dx + dz*dz));
-            }
-
-            document.getElementById('camera-info').textContent = 'Maya View';
-            console.log('[MatchView] Camera matched successfully!');
-        };
-
         // Grid toggle button
         const toggleGridBtn = document.getElementById('toggle-grid');
         toggleGridBtn.addEventListener('click', () => {
             viewer.showGrid = !viewer.showGrid;
+            viewer.showAxis = viewer.showGrid;  // Hide/show axes with grid
             if (viewer.showGrid) {
                 toggleGridBtn.textContent = '▦ Grid (ON)';
-                toggleGridBtn.style.background = '#4CAF50';
-                console.log('[Grid] Grid enabled');
+                toggleGridBtn.className = 'btn-green';
+                console.log('[Grid] Grid and axes enabled');
             } else {
                 toggleGridBtn.textContent = '▦ Grid (OFF)';
-                toggleGridBtn.style.background = '';
-                console.log('[Grid] Grid disabled');
+                toggleGridBtn.className = 'btn-gray';
+                console.log('[Grid] Grid and axes disabled');
+            }
+        });
+
+        // Camera sync toggle button
+        window.cameraSyncEnabled = true;  // Default ON
+        window.cameraSyncBtn = document.getElementById('camera-sync-btn');
+        cameraSyncBtn.addEventListener('click', () => {
+            window.cameraSyncEnabled = !window.cameraSyncEnabled;
+            viewer.syncEnabled = window.cameraSyncEnabled;
+
+            if (window.cameraSyncEnabled) {
+                cameraSyncBtn.textContent = '🎥 Camera (ON)';
+                cameraSyncBtn.className = 'btn-green';
+                console.log('[CameraSync] Camera sync enabled');
+                // Notify Python
+                if (pybridge && pybridge.toggleCameraSync) {
+                    pybridge.toggleCameraSync(true);
+                }
+            } else {
+                cameraSyncBtn.textContent = '🎥 Camera (OFF)';
+                cameraSyncBtn.className = 'btn-gray';
+                console.log('[CameraSync] Camera sync disabled');
+                // Notify Python
+                if (pybridge && pybridge.toggleCameraSync) {
+                    pybridge.toggleCameraSync(false);
+                }
+            }
+        });
+
+        // Object sync toggle button
+        window.objectSyncEnabled = true;  // Default ON
+        window.objectSyncBtn = document.getElementById('object-sync-btn');
+        objectSyncBtn.addEventListener('click', () => {
+            window.objectSyncEnabled = !window.objectSyncEnabled;
+
+            if (window.objectSyncEnabled) {
+                objectSyncBtn.textContent = '🔄 Object (ON)';
+                objectSyncBtn.className = 'btn-green';
+                console.log('[ObjectSync] Object sync enabled');
+                // Notify Python
+                if (pybridge && pybridge.toggleObjectSync) {
+                    pybridge.toggleObjectSync(true);
+                }
+            } else {
+                objectSyncBtn.textContent = '🔄 Object (OFF)';
+                objectSyncBtn.className = 'btn-gray';
+                console.log('[ObjectSync] Object sync disabled');
+                // Notify Python
+                if (pybridge && pybridge.toggleObjectSync) {
+                    pybridge.toggleObjectSync(false);
+                }
             }
         });
 
