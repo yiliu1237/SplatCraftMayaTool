@@ -77,17 +77,23 @@ class WebGLGaussianPanel(QtWidgets.QDialog):
 
         super(WebGLGaussianPanel, self).__init__(parent)
 
-        self.node_name = node_name
-        self.ply_path = ply_path
-        self.gaussian_data = None
+        # Multi-object support: track all SplatCraft nodes in scene
+        self.scene_objects = {}  # {node_name: {'data': gaussian_data, 'ply_path': path, 'last_matrix': matrix}}
         self.data_loaded = False
         self.camera_sync_enabled = True  # Camera view synchronization toggle (enabled by default)
         self.object_sync_enabled = True  # Object transformation synchronization toggle (enabled by default)
 
-        # Transform monitoring
-        self.last_transform_matrix = None
+        # Transform and deletion monitoring
         self.transform_update_count = 0
-        self.transform_monitor_timer = None
+        self.monitor_timer = None  # Combined timer for transform updates and deletion detection
+
+        # If specific node provided, use it; otherwise find all SplatCraft nodes
+        if node_name:
+            self.initial_node = node_name
+            self.initial_ply_path = ply_path
+        else:
+            self.initial_node = None
+            self.initial_ply_path = None
 
         # Setup UI
         self.setWindowTitle("SplatCraft - WebGL Viewer")
@@ -143,8 +149,8 @@ class WebGLGaussianPanel(QtWidgets.QDialog):
             # Removed info_label - WebGL has its own overlay
 
             # Send Gaussian data if we have it
-            if self.gaussian_data and not self.data_loaded:
-                self.sendGaussianDataToViewer()
+            if self.scene_objects and not self.data_loaded:
+                self.sendAllGaussiansToViewer()
 
                 # WebGL will use manual control mode for navigation
                 print("[WebGLPanel] WebGL viewer has initial centered view")
@@ -159,19 +165,125 @@ class WebGLGaussianPanel(QtWidgets.QDialog):
             # No info_label anymore
 
     def loadGaussianData(self):
-        """Load Gaussian data from PLY file or SplatCraft node"""
+        """Load Gaussian data from all SplatCraft nodes in scene"""
 
-        # Option 1: Load from PLY file directly
-        if self.ply_path:
-            self.loadFromPLY(self.ply_path)
+        # Find all SplatCraft nodes in the scene
+        all_splat_nodes = cmds.ls(type='splatCraftNode') or []
+
+        if not all_splat_nodes:
+            print("[WebGLPanel] No SplatCraft nodes found in scene")
             return
 
-        # Option 2: Load from SplatCraft node (via pickle)
-        if self.node_name and cmds.objExists(self.node_name):
-            self.loadFromNode(self.node_name)
-            return
+        print(f"\n[WebGLPanel] Found {len(all_splat_nodes)} SplatCraft node(s) in scene")
 
-        print("[WebGLPanel] No data source specified (need ply_path or node_name)")
+        # Load data for each node
+        for node in all_splat_nodes:
+            # Get parent transform node
+            parents = cmds.listRelatives(node, parent=True, type='transform')
+            if not parents:
+                print(f"[WebGLPanel] Warning: No parent transform for {node}, skipping")
+                continue
+
+            transform_node = parents[0]
+
+            # Get PLY file path
+            file_path = cmds.getAttr(f"{node}.filePath")
+            if not file_path or not os.path.exists(file_path):
+                print(f"[WebGLPanel] Warning: No valid file path for {node}, skipping")
+                continue
+
+            print(f"  Loading: {transform_node} from {os.path.basename(file_path)}")
+
+            # Load the PLY data
+            gaussian_data = self.loadPLYFile(file_path)
+            if gaussian_data:
+                # Get initial transform matrix
+                matrix = cmds.xform(transform_node, query=True, matrix=True, worldSpace=True)
+
+                # Store in scene_objects dict
+                self.scene_objects[transform_node] = {
+                    'data': gaussian_data,
+                    'ply_path': file_path,
+                    'shape_node': node,
+                    'last_matrix': tuple(matrix)
+                }
+
+        if self.scene_objects:
+            print(f"[WebGLPanel] Successfully loaded {len(self.scene_objects)} object(s)")
+        else:
+            print("[WebGLPanel] No objects loaded")
+
+    def loadPLYFile(self, ply_path):
+        """Load Gaussian data from PLY file and return it"""
+        if not os.path.exists(ply_path):
+            print(f"[WebGLPanel] PLY file not found: {ply_path}")
+            return None
+
+        try:
+            from plyfile import PlyData
+
+            plydata = PlyData.read(ply_path)
+            vertices = plydata['vertex']
+
+            # Extract data
+            positions = np.vstack([vertices['x'], vertices['y'], vertices['z']]).T.astype(np.float32)
+
+            # Colors (SH coefficients)
+            colors_dc = np.vstack([
+                vertices['f_dc_0'],
+                vertices['f_dc_1'],
+                vertices['f_dc_2']
+            ]).T.astype(np.float32)
+
+            opacities_raw = vertices['opacity'].astype(np.float32)
+            scales_raw = np.vstack([
+                vertices['scale_0'],
+                vertices['scale_1'],
+                vertices['scale_2']
+            ]).T.astype(np.float32)
+
+            rotations = np.vstack([
+                vertices['rot_0'], vertices['rot_1'],
+                vertices['rot_2'], vertices['rot_3']
+            ]).T.astype(np.float32)
+
+            # If file is (w,x,y,z), reorder to (x,y,z,w)
+            if np.mean(np.abs(rotations[:, 0])) > np.mean(np.abs(rotations[:, 3])) * 1.5:
+                rotations = rotations[:, [1, 2, 3, 0]]
+
+            # normalize
+            rotations /= (np.linalg.norm(rotations, axis=1, keepdims=True) + 1e-8)
+
+            # Process colors (RGB in [0, 1])
+            SH_C0 = 0.28209479177387814
+            colors = (colors_dc * SH_C0 + 0.5).clip(0, 1)
+
+            # Process opacities (apply sigmoid)
+            opacities = 1.0 / (1.0 + np.exp(-opacities_raw))
+
+            # Process scales (apply exp)
+            scales = np.exp(scales_raw)
+
+            # avoid paper-thin or monster splats
+            scales = np.clip(scales, 1e-3, 1e3)
+
+            # Return data as dictionary
+            gaussian_data = {
+                'positions': positions.flatten().tolist(),
+                'colors': colors.flatten().tolist(),
+                'opacities': opacities.tolist(),
+                'scales': scales.flatten().tolist(),
+                'rotations': rotations.flatten().tolist(),
+                'count': len(positions)
+            }
+
+            return gaussian_data
+
+        except Exception as e:
+            print(f"[WebGLPanel] Error loading PLY {ply_path}: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
 
     def loadFromPLY(self, ply_path):
         """Load Gaussian data directly from PLY file"""
@@ -347,34 +459,63 @@ class WebGLGaussianPanel(QtWidgets.QDialog):
             import traceback
             traceback.print_exc()
 
-    def sendGaussianDataToViewer(self):
-        """Send Gaussian data to the WebGL viewer via JavaScript"""
-        if not self.gaussian_data:
-            print("[WebGLPanel] No Gaussian data to send")
+    def sendAllGaussiansToViewer(self):
+        """Send all Gaussian objects to the WebGL viewer via JavaScript"""
+        if not self.scene_objects:
+            print("[WebGLPanel] No Gaussian objects to send")
             return
 
-        original_count = self.gaussian_data['count']
-        print(f"[WebGLPanel] Sending ALL {original_count:,} Gaussians to WebGL (no downsampling)...")
+        print(f"\n[WebGLPanel] Sending {len(self.scene_objects)} object(s) to WebGL...")
 
-        # Send all data without downsampling
-        data_to_send = self.gaussian_data
+        # Prepare array of objects
+        objects_data = []
+        total_gaussians = 0
+
+        for node_name, obj_info in self.scene_objects.items():
+            gaussian_data = obj_info['data']
+            matrix = list(obj_info['last_matrix'])
+
+            # Package each object with its data and transform
+            obj_package = {
+                'node_name': node_name,
+                'data': gaussian_data,
+                'transform': matrix
+            }
+            objects_data.append(obj_package)
+            total_gaussians += gaussian_data['count']
+
+            print(f"  • {node_name}: {gaussian_data['count']:,} Gaussians")
 
         # Convert to JSON
-        data_json = json.dumps(data_to_send)
-        json_size_mb = len(data_json) / (1024 * 1024)
-        print(f"[WebGLPanel] JSON payload size: {json_size_mb:.2f} MB")
+        scene_json = json.dumps(objects_data)
+        json_size_mb = len(scene_json) / (1024 * 1024)
+        print(f"[WebGLPanel] Total: {total_gaussians:,} Gaussians ({json_size_mb:.2f} MB)")
 
-        # Call JavaScript function (no callback in PySide6)
-        js_code = f"window.setGaussianData({data_json});"
+        # Call JavaScript function to load all objects
+        js_code = f"window.setSceneData({scene_json});"
         self.web_view.page().runJavaScript(js_code)
 
-        # Set initial far camera - looking at scene from far away
-        if hasattr(self, 'model_center') and hasattr(self, 'model_size'):
-            # Position camera very far back
-            far_distance = self.model_size * 5.0  # 5x the model size
+        # Set initial camera to view entire scene
+        # Calculate scene bounding box from all objects
+        all_positions = []
+        for obj_info in self.scene_objects.values():
+            data = obj_info['data']
+            positions_flat = data['positions']
+            # Reshape and collect
+            positions = np.array(positions_flat).reshape(-1, 3)
+            all_positions.append(positions)
+
+        if all_positions:
+            all_positions_array = np.vstack(all_positions)
+            scene_center = all_positions_array.mean(axis=0)
+            scene_min = all_positions_array.min(axis=0)
+            scene_max = all_positions_array.max(axis=0)
+            scene_size = np.linalg.norm(scene_max - scene_min)
+
+            far_distance = scene_size * 2.5
             initial_camera = {
                 'position': [0, 0, far_distance],
-                'target': self.model_center.tolist(),
+                'target': scene_center.tolist(),
                 'up': [0, 1, 0],
                 'distance': far_distance
             }
@@ -385,8 +526,7 @@ class WebGLGaussianPanel(QtWidgets.QDialog):
 
         # Mark as loaded
         self.data_loaded = True
-        print("[WebGLPanel] Gaussian data sent to WebGL viewer")
-        # Removed info_label update
+        print("[WebGLPanel] All Gaussian objects sent to WebGL viewer\n")
 
 
     def setCameraSyncFromJS(self, enabled):
@@ -471,8 +611,8 @@ class WebGLGaussianPanel(QtWidgets.QDialog):
         self.object_sync_enabled = enabled
 
         if enabled:
-            if not self.node_name or not cmds.objExists(self.node_name):
-                print("[ObjectSync] ERROR: No valid node to monitor!")
+            if not self.scene_objects:
+                print("[ObjectSync] ERROR: No objects to monitor!")
                 self.object_sync_enabled = False
                 # Update button state in JS to reflect failure
                 js_code = """
@@ -486,111 +626,112 @@ class WebGLGaussianPanel(QtWidgets.QDialog):
                 return
 
             print("\n" + "="*60)
-            print(f"[ObjectSync] ENABLED - Maya object → WebGL Gaussians")
-            print(f"  • Monitoring node: {self.node_name}")
-            print("  • Rotate/move Maya object → Gaussians transform in WebGL")
+            print(f"[ObjectSync] ENABLED - Maya objects → WebGL Gaussians")
+            print(f"  • Monitoring {len(self.scene_objects)} object(s)")
+            print("  • Rotate/move Maya objects → Gaussians transform in WebGL")
+            print("  • Delete Maya objects → Removed from WebGL")
             print("="*60 + "\n")
 
-            # Start monitoring transform
-            self.startTransformMonitoring()
+            # Start monitoring transforms and deletions
+            self.startMonitoring()
         else:
             print("[ObjectSync] DISABLED - Object sync off\n")
-            self.stopTransformMonitoring()
+            self.stopMonitoring()
 
     def enableObjectSyncInJS(self):
-        """Enable object sync - start monitoring if valid node exists"""
-        if self.node_name and cmds.objExists(self.node_name):
-            print(f"[ObjectSync] Starting monitoring for node: {self.node_name}")
-            self.startTransformMonitoring()
+        """Enable object sync - start monitoring all nodes"""
+        if self.scene_objects:
+            print(f"[ObjectSync] Starting monitoring for {len(self.scene_objects)} object(s)")
+            self.startMonitoring()
         else:
-            print("[ObjectSync] No valid node to monitor")
+            print("[ObjectSync] No objects to monitor")
 
-    def startTransformMonitoring(self):
-        """Start monitoring the Maya transform node"""
-        if self.transform_monitor_timer is not None:
+    def startMonitoring(self):
+        """Start monitoring all Maya transform nodes (transforms + deletions)"""
+        if self.monitor_timer is not None:
             # Already monitoring
             return
 
-        # Create timer to check transform every 100ms
-        self.transform_monitor_timer = QTimer(self)
-        self.transform_monitor_timer.timeout.connect(self.checkTransformUpdate)
-        self.transform_monitor_timer.start(100)  # Check every 100ms
+        # Create timer to check transforms and deletions every 100ms
+        self.monitor_timer = QTimer(self)
+        self.monitor_timer.timeout.connect(self.checkSceneUpdates)
+        self.monitor_timer.start(100)  # Check every 100ms
 
-        # Get initial transform state
-        if cmds.objExists(self.node_name):
-            matrix = cmds.xform(self.node_name, query=True, matrix=True, worldSpace=True)
-            self.last_transform_matrix = tuple(matrix)
+        print(f"[ObjectSync] Started monitoring {len(self.scene_objects)} object(s)")
 
-        print(f"[ObjectSync] Started monitoring '{self.node_name}'")
+    def stopMonitoring(self):
+        """Stop monitoring all Maya transform nodes"""
+        if self.monitor_timer is not None:
+            self.monitor_timer.stop()
+            self.monitor_timer.deleteLater()
+            self.monitor_timer = None
+            print("[ObjectSync] Stopped monitoring")
 
-    def stopTransformMonitoring(self):
-        """Stop monitoring the Maya transform node"""
-        if self.transform_monitor_timer is not None:
-            self.transform_monitor_timer.stop()
-            self.transform_monitor_timer.deleteLater()
-            self.transform_monitor_timer = None
-            print("[ObjectSync] Stopped transform monitoring")
-
-    def checkTransformUpdate(self):
-        """Check if transform has changed and send update to WebGL"""
-        if not self.object_sync_enabled or not self.node_name:
+    def checkSceneUpdates(self):
+        """Check for transform changes and deletions for all objects"""
+        if not self.object_sync_enabled:
             return
 
         try:
-            if not cmds.objExists(self.node_name):
-                print(f"[ObjectSync] ERROR: Node '{self.node_name}' no longer exists!")
-                self.stopTransformMonitoring()
-                self.object_sync_enabled = False
-                # Update button state in JS
-                js_code = """
-                    if (window.objectSyncBtn) {
-                        objectSyncEnabled = false;
-                        objectSyncBtn.textContent = '🔄 Object (OFF)';
-                        objectSyncBtn.className = 'btn-gray';
-                    }
-                """
+            # Check for deletions first
+            deleted_nodes = []
+            for node_name in list(self.scene_objects.keys()):
+                if not cmds.objExists(node_name):
+                    deleted_nodes.append(node_name)
+
+            # Remove deleted objects
+            for node_name in deleted_nodes:
+                print(f"[ObjectSync] Object '{node_name}' was deleted!")
+                del self.scene_objects[node_name]
+
+                # Notify WebGL to remove the object
+                js_code = f"if (window.viewer && window.viewer.removeObject) {{ window.viewer.removeObject('{node_name}'); }}"
                 self.web_view.page().runJavaScript(js_code)
-                return
 
-            # Get current world matrix
-            matrix = cmds.xform(self.node_name, query=True, matrix=True, worldSpace=True)
-            current_matrix = tuple(matrix)
+            # Check for transform updates on remaining objects
+            for node_name, obj_info in self.scene_objects.items():
+                if not cmds.objExists(node_name):
+                    continue
 
-            # Check if changed
-            if current_matrix != self.last_transform_matrix:
-                self.last_transform_matrix = current_matrix
-                self.transform_update_count += 1
+                # Get current world matrix
+                matrix = cmds.xform(node_name, query=True, matrix=True, worldSpace=True)
+                current_matrix = tuple(matrix)
 
-                # Send transform to WebGL
-                self.sendTransformToWebGL(matrix)
+                # Check if changed
+                if current_matrix != obj_info['last_matrix']:
+                    obj_info['last_matrix'] = current_matrix
+                    self.transform_update_count += 1
 
-                # Debug: Log first few updates
-                if self.transform_update_count <= 3:
-                    print(f"[ObjectSync] Transform update #{self.transform_update_count}")
+                    # Send transform to WebGL
+                    self.sendObjectTransformToWebGL(node_name, matrix)
+
+                    # Debug: Log first few updates
+                    if self.transform_update_count <= 3:
+                        print(f"[ObjectSync] Transform update #{self.transform_update_count}: {node_name}")
 
         except Exception as e:
-            print(f"[ObjectSync] Error checking transform: {e}")
+            print(f"[ObjectSync] Error checking scene updates: {e}")
 
-    def sendTransformToWebGL(self, matrix):
-        """Send transform matrix to WebGL viewer"""
+    def sendObjectTransformToWebGL(self, node_name, matrix):
+        """Send transform matrix for a specific object to WebGL viewer"""
         try:
             # Maya matrix is 4x4 row-major
             matrix_array = list(matrix)
 
-            # Send to JavaScript
+            # Send to JavaScript with node name
             matrix_json = json.dumps(matrix_array)
-            js_code = f"if (window.viewer && window.viewer.applyObjectTransform) {{ window.viewer.applyObjectTransform({matrix_json}); }}"
+            js_code = f"if (window.viewer && window.viewer.updateObjectTransform) {{ window.viewer.updateObjectTransform('{node_name}', {matrix_json}); }}"
             self.web_view.page().runJavaScript(js_code)
 
         except Exception as e:
-            print(f"[ObjectSync] Error sending transform: {e}")
+            print(f"[ObjectSync] Error sending transform for {node_name}: {e}")
             import traceback
             traceback.print_exc()
 
     def closeEvent(self, event):
         """Clean up when closing"""
-        # Stop transform monitoring
-        self.stopTransformMonitoring()
+        # Stop monitoring
+        self.stopMonitoring()
 
         print("[WebGLPanel] Panel closed")
         super().closeEvent(event)

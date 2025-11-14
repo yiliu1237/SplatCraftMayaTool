@@ -13,10 +13,14 @@ class GaussianViewer {
             return;
         }
 
-        // Rendering state
-        this.gaussianCount = 0;
-        this.buffers = {};
+        // Multi-object scene support
+        this.sceneObjects = {};  // {node_name: {data, buffers, transform, gaussianCount}}
+        this.totalGaussianCount = 0;
+        this.objectCount = 0;
+
+        // Shared rendering resources
         this.program = null;
+        this.quadBuffer = null;
 
         // Camera state (will be updated from Maya)
         this.camera = {
@@ -35,6 +39,8 @@ class GaussianViewer {
             pitch: 0,
             distance: 100
         };
+        // Store initial camera state for reset
+        this.initialCamera = null;
         this.keys = {};
         this.mouseDown = false;
         this.lastMouseX = 0;
@@ -53,9 +59,6 @@ class GaussianViewer {
         this.axisBuffers = null;
         this.showAxis = true;
 
-        // Object transformation (from Maya)
-        this.objectTransformMatrix = this.createIdentityMatrix();
-
         // Initialize
         this.setupWebGL();
 
@@ -66,13 +69,12 @@ class GaussianViewer {
         }
         
         this._initUnitQuad = () => {
-        // 2D quad in [-1,1]^2 for billboard impostors
+        // 2D quad in [-1,1]^2 for billboard impostors (shared by all objects)
         const verts = new Float32Array([
             -1,-1,   1,-1,   -1, 1,   1, 1
         ]);
-        this.buffers = this.buffers || {};
-        this.buffers.quad = this.gl.createBuffer();
-        this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.buffers.quad);
+        this.quadBuffer = this.gl.createBuffer();
+        this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.quadBuffer);
         this.gl.bufferData(this.gl.ARRAY_BUFFER, verts, this.gl.STATIC_DRAW);
         };
         this._initUnitQuad();
@@ -448,10 +450,15 @@ class GaussianViewer {
         return shader;
     }
 
-    loadGaussians(data) {
+    loadGaussians(data, node_name = 'default_object') {
+        /**
+         * Load a single Gaussian object into the scene
+         * @param {Object} data - Gaussian data (positions, colors, opacities, scales, rotations)
+         * @param {String} node_name - Unique identifier for this object
+         */
         const gl = this.gl;
 
-        console.log('Loading Gaussian data:', data);
+        console.log(`[LoadObject] Loading Gaussian data for '${node_name}':`, data);
 
         // Extract data
         const positions = new Float32Array(data.positions);
@@ -469,27 +476,135 @@ class GaussianViewer {
             for (let i = 0; i < N; ++i) rotations[i*4 + 3] = 1.0; // (0,0,0,1)
         }
 
+        const gaussianCount = positions.length / 3;
 
-        this.gaussianCount = positions.length / 3;
-
-        console.log(`Data loaded: ${this.gaussianCount} Gaussians`);
+        console.log(`  ${gaussianCount} Gaussians`);
         console.log(`  Positions: ${positions.length} floats`);
         console.log(`  Colors: ${colors.length} floats`);
         console.log(`  Opacities: ${opacities.length} floats`);
         console.log(`  Scales: ${scales.length} floats`);
 
-        // Create and upload buffers
-        this.buffers.position = this.createBuffer(positions);
-        this.buffers.color = this.createBuffer(colors);
-        this.buffers.opacity = this.createBuffer(opacities);
-        this.buffers.scale = this.createBuffer(scales);
-        this.buffers.rotation = this.createBuffer(rotations);
+        // Create and upload buffers for this object
+        const buffers = {
+            position: this.createBuffer(positions),
+            color: this.createBuffer(colors),
+            opacity: this.createBuffer(opacities),
+            scale: this.createBuffer(scales),
+            rotation: this.createBuffer(rotations)
+        };
+
+        // Store object in scene
+        this.sceneObjects[node_name] = {
+            gaussianCount: gaussianCount,
+            buffers: buffers,
+            transform: this.createIdentityMatrix()  // Default identity transform
+        };
+
+        // Update totals
+        this.updateSceneTotals();
+
+        console.log(`✓ Loaded object '${node_name}' with ${gaussianCount.toLocaleString()} Gaussians to GPU`);
+    }
+
+    loadSceneData(sceneObjectsArray) {
+        /**
+         * Load multiple Gaussian objects from Python
+         * @param {Array} sceneObjectsArray - Array of {node_name, data, transform}
+         */
+        console.log(`[LoadScene] Loading ${sceneObjectsArray.length} objects from Python`);
+
+        for (const obj of sceneObjectsArray) {
+            const node_name = obj.node_name;
+            const data = obj.data;
+            const transform = obj.transform || null;
+
+            // Load the Gaussian data
+            this.loadGaussians(data, node_name);
+
+            // Apply transform if provided
+            if (transform && transform.length === 16) {
+                this.updateObjectTransform(node_name, transform);
+            }
+        }
+
+        console.log(`✓ Scene loaded: ${this.objectCount} objects, ${this.totalGaussianCount.toLocaleString()} total Gaussians`);
+    }
+
+    updateSceneTotals() {
+        /**
+         * Recalculate total Gaussian count and object count
+         */
+        this.objectCount = Object.keys(this.sceneObjects).length;
+        this.totalGaussianCount = 0;
+
+        for (const node_name in this.sceneObjects) {
+            this.totalGaussianCount += this.sceneObjects[node_name].gaussianCount;
+        }
 
         // Update UI
-        document.getElementById('gaussian-count').textContent = this.gaussianCount.toLocaleString();
+        document.getElementById('object-count').textContent = this.objectCount.toLocaleString();
+        document.getElementById('gaussian-count').textContent = this.totalGaussianCount.toLocaleString();
+    }
 
-        console.log(`✓ Loaded ${this.gaussianCount.toLocaleString()} Gaussians to GPU`);
-        console.log(`✓ Rendering should begin now...`);
+    removeObject(node_name) {
+        /**
+         * Remove an object from the scene (e.g., when deleted in Maya)
+         * @param {String} node_name - Name of the object to remove
+         */
+        if (!this.sceneObjects[node_name]) {
+            console.warn(`[RemoveObject] Object '${node_name}' not found in scene`);
+            return;
+        }
+
+        console.log(`[RemoveObject] Removing object '${node_name}'`);
+
+        // Delete WebGL buffers
+        const gl = this.gl;
+        const buffers = this.sceneObjects[node_name].buffers;
+
+        if (buffers.position) gl.deleteBuffer(buffers.position);
+        if (buffers.color) gl.deleteBuffer(buffers.color);
+        if (buffers.opacity) gl.deleteBuffer(buffers.opacity);
+        if (buffers.scale) gl.deleteBuffer(buffers.scale);
+        if (buffers.rotation) gl.deleteBuffer(buffers.rotation);
+
+        // Remove from scene
+        delete this.sceneObjects[node_name];
+
+        // Update totals
+        this.updateSceneTotals();
+
+        console.log(`✓ Object '${node_name}' removed. Scene now has ${this.objectCount} objects`);
+    }
+
+    updateObjectTransform(node_name, mayaMatrix) {
+        /**
+         * Update the transform matrix for a specific object
+         * @param {String} node_name - Name of the object
+         * @param {Array} mayaMatrix - 4x4 transformation matrix from Maya (16 floats)
+         */
+        if (!this.sceneObjects[node_name]) {
+            console.warn(`[UpdateTransform] Object '${node_name}' not found in scene`);
+            return;
+        }
+
+        if (!mayaMatrix || mayaMatrix.length !== 16) {
+            console.error(`[UpdateTransform] Invalid matrix for '${node_name}':`, mayaMatrix);
+            return;
+        }
+
+        // Store the transform matrix
+        this.sceneObjects[node_name].transform = new Float32Array(mayaMatrix);
+
+        // Debug: Log first few transforms
+        if (!this.transformUpdateCount) this.transformUpdateCount = 0;
+        this.transformUpdateCount++;
+
+        if (this.transformUpdateCount <= 3) {
+            console.log(`[UpdateTransform] Object '${node_name}' transform updated #${this.transformUpdateCount}:`, {
+                translation: [mayaMatrix[12], mayaMatrix[13], mayaMatrix[14]]
+            });
+        }
     }
 
 
@@ -529,8 +644,8 @@ class GaussianViewer {
 
     setInitialFarCamera(cameraInfo) {
         // Set initial camera position far from scene
-        this.manualCamera.position = cameraInfo.position;
-        this.manualCamera.target = cameraInfo.target;
+        this.manualCamera.position = cameraInfo.position.slice();  // Copy array
+        this.manualCamera.target = cameraInfo.target.slice();
         this.manualCamera.distance = cameraInfo.distance;
 
         // Calculate initial yaw/pitch from position to target
@@ -540,6 +655,16 @@ class GaussianViewer {
 
         this.manualCamera.yaw = Math.atan2(dx, dz);
         this.manualCamera.pitch = Math.atan2(dy, Math.sqrt(dx*dx + dz*dz));
+
+        // Store initial state for reset button
+        this.initialCamera = {
+            position: cameraInfo.position.slice(),
+            target: cameraInfo.target.slice(),
+            up: cameraInfo.up.slice(),
+            yaw: this.manualCamera.yaw,
+            pitch: this.manualCamera.pitch,
+            distance: cameraInfo.distance
+        };
 
         // IMPORTANT: Apply this good view to the actual rendering camera immediately
         // Build view matrix from the manual camera settings
@@ -554,6 +679,38 @@ class GaussianViewer {
         this.camera.projectionMatrix = this.createPerspectiveMatrix(45, aspect, 0.1, 10000);
 
         console.log('[WebGL] Initial far camera set and APPLIED to rendering:', this.manualCamera);
+    }
+
+    resetCamera() {
+        /**
+         * Reset camera to initial position (called by reset button)
+         */
+        if (!this.initialCamera) {
+            console.warn('[ResetCamera] No initial camera state stored');
+            return;
+        }
+
+        console.log('[ResetCamera] Restoring camera to initial position');
+
+        // Restore manual camera state
+        this.manualCamera.position = this.initialCamera.position.slice();
+        this.manualCamera.target = this.initialCamera.target.slice();
+        this.manualCamera.yaw = this.initialCamera.yaw;
+        this.manualCamera.pitch = this.initialCamera.pitch;
+        this.manualCamera.distance = this.initialCamera.distance;
+
+        // Rebuild view matrix
+        this.camera.viewMatrix = this.createLookAtMatrix(
+            this.initialCamera.position,
+            this.initialCamera.target,
+            this.initialCamera.up
+        );
+
+        // Update projection matrix
+        const aspect = this.canvas.width / this.canvas.height;
+        this.camera.projectionMatrix = this.createPerspectiveMatrix(45, aspect, 0.1, 10000);
+
+        console.log('[ResetCamera] Camera reset complete');
     }
 
     setupCanvas() {
@@ -655,7 +812,7 @@ class GaussianViewer {
             document.getElementById('pitch-value').textContent = (this.manualCamera.pitch * 180 / Math.PI).toFixed(0);
         }
 
-        const moveSpeed = 5.0;
+        const moveSpeed = 1.0;  // Reduced from 5.0 for finer control
 
         // Forward from yaw/pitch
         const cy = Math.cos(this.manualCamera.yaw);
@@ -758,41 +915,45 @@ class GaussianViewer {
     }
 
 
-    bindInstanced() {
+    bindInstancedForObject(buffers) {
+        /**
+         * Bind buffers for a specific object's Gaussians
+         * @param {Object} buffers - Object containing position, rotation, scale, color, opacity buffers
+         */
         const gl = this.gl, ext = this.extInst, loc = this.locations;
 
-        // Per-vertex quad
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.quad);
+        // Per-vertex quad (shared across all objects)
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuffer);
         gl.enableVertexAttribArray(loc.a_quadPos);
         gl.vertexAttribPointer(loc.a_quadPos, 2, gl.FLOAT, false, 0, 0);
         ext.vertexAttribDivisorANGLE(loc.a_quadPos, 0); // per-vertex
 
         // Per-instance: centers
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.position);
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffers.position);
         gl.enableVertexAttribArray(loc.a_center);
         gl.vertexAttribPointer(loc.a_center, 3, gl.FLOAT, false, 0, 0);
         ext.vertexAttribDivisorANGLE(loc.a_center, 1);
 
         // Per-instance: rotations
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.rotation);
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffers.rotation);
         gl.enableVertexAttribArray(loc.a_quat);
         gl.vertexAttribPointer(loc.a_quat, 4, gl.FLOAT, false, 0, 0);
         ext.vertexAttribDivisorANGLE(loc.a_quat, 1);
 
         // Per-instance: scales
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.scale);
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffers.scale);
         gl.enableVertexAttribArray(loc.a_scale);
         gl.vertexAttribPointer(loc.a_scale, 3, gl.FLOAT, false, 0, 0);
         ext.vertexAttribDivisorANGLE(loc.a_scale, 1);
 
         // Per-instance: colors
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.color);
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffers.color);
         gl.enableVertexAttribArray(loc.a_color);
         gl.vertexAttribPointer(loc.a_color, 3, gl.FLOAT, false, 0, 0);
         ext.vertexAttribDivisorANGLE(loc.a_color, 1);
 
         // Per-instance: opacity
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.opacity);
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffers.opacity);
         gl.enableVertexAttribArray(loc.a_opacity);
         gl.vertexAttribPointer(loc.a_opacity, 1, gl.FLOAT, false, 0, 0);
         ext.vertexAttribDivisorANGLE(loc.a_opacity, 1);
@@ -809,15 +970,15 @@ class GaussianViewer {
         this.renderGrid();
         this.renderAxis();
 
-        if (!this.program || this.gaussianCount === 0) {
-            // Just show grid if no Gaussians loaded
+        if (!this.program || this.objectCount === 0) {
+            // Just show grid if no objects loaded
             return;
         }
 
         // Debug: Log first render
         if (!this.hasRendered) {
             this.hasRendered = true;
-            console.log(`[Render] Starting render with ${this.gaussianCount.toLocaleString()} Gaussians`);
+            console.log(`[Render] Starting multi-object render with ${this.objectCount} objects, ${this.totalGaussianCount.toLocaleString()} total Gaussians`);
             console.log(`[Render] View matrix:`, this.camera.viewMatrix.slice(0, 8));
             console.log(`[Render] Projection matrix:`, this.camera.projectionMatrix.slice(0, 8));
         }
@@ -835,15 +996,23 @@ class GaussianViewer {
             gl.depthFunc(gl.LEQUAL); // keeps frontmost already-written depth; experimentation OK
         }
 
-
-        // Set uniforms
+        // Set camera uniforms (shared by all objects)
         gl.uniformMatrix4fv(this.locations.u_viewMatrix, false, this.camera.viewMatrix);
         gl.uniformMatrix4fv(this.locations.u_projectionMatrix, false, this.camera.projectionMatrix);
-        gl.uniformMatrix4fv(this.locations.u_objectTransform, false, this.objectTransformMatrix);
 
+        // Render each object in the scene
+        for (const node_name in this.sceneObjects) {
+            const obj = this.sceneObjects[node_name];
 
-        this.bindInstanced();
-        this.extInst.drawArraysInstancedANGLE(gl.TRIANGLE_STRIP, 0, 4, this.gaussianCount);
+            // Set object transform uniform
+            gl.uniformMatrix4fv(this.locations.u_objectTransform, false, obj.transform);
+
+            // Bind this object's buffers
+            this.bindInstancedForObject(obj.buffers);
+
+            // Draw this object's Gaussians
+            this.extInst.drawArraysInstancedANGLE(gl.TRIANGLE_STRIP, 0, 4, obj.gaussianCount);
+        }
 
         // Cleanup
         gl.disableVertexAttribArray(this.locations.a_quadPos);
@@ -957,41 +1126,4 @@ class GaussianViewer {
         ]);
     }
 
-    applyObjectTransform(mayaMatrix) {
-        /**
-         * Apply object transformation from Maya to all Gaussians
-         *
-         * @param {Array} mayaMatrix - 4x4 transformation matrix from Maya (row-major, 16 floats)
-         *
-         * Maya matrix format is row-major:
-         * [m00, m01, m02, m03,
-         *  m10, m11, m12, m13,
-         *  m20, m21, m22, m23,
-         *  m30, m31, m32, m33]
-         *
-         * WebGL expects column-major. Maya uses row-vectors (v*M), WebGL uses column-vectors (M*v)
-         * To convert: keep matrix as-is (don't transpose) because Maya's row-major with row-vectors
-         * equals WebGL's column-major with column-vectors
-         */
-        if (!mayaMatrix || mayaMatrix.length !== 16) {
-            console.error('[ObjectTransform] Invalid matrix received:', mayaMatrix);
-            return;
-        }
-
-        // Maya's row-major matrix can be used directly in WebGL's column-major layout
-        // This preserves the correct rotation direction
-        this.objectTransformMatrix = new Float32Array(mayaMatrix);
-
-        // Debug: Log first few transforms
-        if (!this.transformUpdateCount) this.transformUpdateCount = 0;
-        this.transformUpdateCount++;
-
-        if (this.transformUpdateCount <= 3) {
-            console.log(`[ObjectTransform] Update #${this.transformUpdateCount}:`, {
-                translation: [mayaMatrix[12], mayaMatrix[13], mayaMatrix[14]],
-                rotation: 'applied',
-                matrix: this.objectTransformMatrix
-            });
-        }
-    }
 }

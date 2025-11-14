@@ -137,6 +137,7 @@
     <canvas id="canvas"></canvas>
 
     <div id="info">
+        <div>Objects: <span id="object-count">0</span></div>
         <div>Gaussians: <span id="gaussian-count">0</span></div>
         <div>FPS: <span id="fps">0</span></div>
         <div>Camera: <span id="camera-info">Ready</span></div>
@@ -149,6 +150,9 @@
             </button>
             <button id="toggle-grid" class="btn-green" title="Toggle XZ ground plane grid">
                 ▦ Grid (ON)
+            </button>
+            <button id="reset-camera" class="btn-gray" title="Reset camera to initial position">
+                🔄 Reset View
             </button>
         </div>
 
@@ -181,10 +185,17 @@
         // Expose to Maya (Python can call these via JavaScript bridge)
         window.viewer = viewer;
 
-        // Test function callable from Python
+        // Test function callable from Python (legacy single-object support)
         window.setGaussianData = function(data) {
             console.log('Received Gaussian data from Python:', data.count, 'points');
-            viewer.loadGaussians(data);
+            viewer.loadGaussians(data, 'default_object');
+            document.getElementById('loading').classList.add('hidden');
+        };
+
+        // Multi-object scene data callable from Python
+        window.setSceneData = function(sceneObjectsArray) {
+            console.log('[HTML] Received scene data from Python:', sceneObjectsArray.length, 'objects');
+            viewer.loadSceneData(sceneObjectsArray);
             document.getElementById('loading').classList.add('hidden');
         };
 
@@ -315,6 +326,17 @@
             viewer.updateCameraFromMaya(cameraData);
         };
 
+        // Remove object from scene (called when object is deleted in Maya)
+        window.removeObject = function(node_name) {
+            console.log('[HTML] Remove object request from Python:', node_name);
+            viewer.removeObject(node_name);
+        };
+
+        // Update object transform (called when object is moved/rotated in Maya)
+        window.updateObjectTransform = function(node_name, matrix) {
+            viewer.updateObjectTransform(node_name, matrix);
+        };
+
         // Grid toggle button
         const toggleGridBtn = document.getElementById('toggle-grid');
         toggleGridBtn.addEventListener('click', () => {
@@ -329,6 +351,13 @@
                 toggleGridBtn.className = 'btn-gray';
                 console.log('[Grid] Grid and axes disabled');
             }
+        });
+
+        // Reset camera button
+        const resetCameraBtn = document.getElementById('reset-camera');
+        resetCameraBtn.addEventListener('click', () => {
+            console.log('[ResetCamera] Resetting camera to initial position');
+            viewer.resetCamera();
         });
 
         // Camera sync toggle button
